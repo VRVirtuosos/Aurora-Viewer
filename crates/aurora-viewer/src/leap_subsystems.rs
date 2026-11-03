@@ -268,7 +268,7 @@ pub fn register_subsystem_apis(manager: &mut LeapManager) {
     manager.register_api(radar_api);
 
     // 10. LLObjects / LLSelect
-    let mut objects_api = ApiMetadata::new("LLObjects", "Spatial querying, selection, and inspection of simulator objects and prims");
+    let mut objects_api = ApiMetadata::new("LLObjects", "Spatial querying, selection, primitive creation, and object manipulation");
     objects_api.add_operation(
         OperationMetadata::new("getNearbyObjects", "Query nearby objects and primitives in draw distance")
             .with_optional(&["max_distance", "limit", "include_attachments", "reqid", "reply"]),
@@ -282,8 +282,38 @@ pub fn register_subsystem_apis(manager: &mut LeapManager) {
             .with_optional(&["local_id", "uuid", "reqid", "reply"]),
     );
     objects_api.add_operation(
-        OperationMetadata::new("deselect", "Deselect active object selection")
-            .with_optional(&["reqid", "reply"]),
+        OperationMetadata::new("deselect", "Deselect active object selection or specific object")
+            .with_optional(&["local_id", "uuid", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("createObject", "Rez a new primitive (cube, sphere, cylinder, prism, pyramid, cone, torus, etc.) inworld")
+            .with_optional(&["shape", "shape_index", "position", "x", "y", "z", "scale", "scale_x", "scale_y", "scale_z", "rotation", "material", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("deleteObject", "Delete/derez an inworld object into the trash")
+            .with_optional(&["local_id", "uuid", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("setTransform", "Modify an object's position, rotation, or scale")
+            .with_optional(&["local_id", "uuid", "position", "x", "y", "z", "scale", "scale_x", "scale_y", "scale_z", "rotation", "linked", "uniform", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("setName", "Set the display name of an inworld object")
+            .with_required(&["name"])
+            .with_optional(&["local_id", "uuid", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("setDescription", "Set the description of an inworld object")
+            .with_required(&["description"])
+            .with_optional(&["local_id", "uuid", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("duplicate", "Duplicate an inworld object with an offset")
+            .with_optional(&["local_id", "uuid", "offset", "offset_x", "offset_y", "offset_z", "reqid", "reply"]),
+    );
+    objects_api.add_operation(
+        OperationMetadata::new("setFlags", "Update physics, temporary, or phantom flags on an object")
+            .with_optional(&["local_id", "uuid", "physics", "temporary", "phantom", "reqid", "reply"]),
     );
     manager.register_api(objects_api);
 
@@ -1919,6 +1949,86 @@ fn handle_nearby_avatars(app: &mut App, op: &str, data: &Llsd, reply_pump: &str)
     }
 }
 
+fn prim_shape_index(shape_str: &str) -> usize {
+    match shape_str.trim().to_ascii_lowercase().as_str() {
+        "box" | "cube" => 0,
+        "prism" | "right_prism" | "right-prism" => 1,
+        "pyramid" => 2,
+        "tetrahedron" => 3,
+        "cylinder" => 4,
+        "half_cylinder" | "half-cylinder" | "hemicylinder" => 5,
+        "cone" => 6,
+        "half_cone" | "half-cone" | "hemicone" => 7,
+        "sphere" => 8,
+        "half_sphere" | "half-sphere" | "hemisphere" => 9,
+        "torus" => 10,
+        "tube" => 11,
+        "ring" => 12,
+        _ => 0,
+    }
+}
+
+fn parse_llsd_vec3(data: &Llsd, key: &str, alt_x: &str, alt_y: &str, alt_z: &str) -> Option<glam::Vec3> {
+    if data.has(key) && data.get(key).is_array() {
+        let arr = data.get(key).as_array();
+        if arr.len() >= 3 {
+            return Some(glam::Vec3::new(arr[0].as_f32(), arr[1].as_f32(), arr[2].as_f32()));
+        }
+    }
+    if data.has(alt_x) && data.has(alt_y) && data.has(alt_z) {
+        return Some(glam::Vec3::new(
+            data.get(alt_x).as_f32(),
+            data.get(alt_y).as_f32(),
+            data.get(alt_z).as_f32(),
+        ));
+    }
+    None
+}
+
+fn parse_llsd_scale(data: &Llsd) -> Option<glam::Vec3> {
+    use crate::build::{MAX_PRIM_SCALE, MIN_PRIM_SCALE};
+    if let Some(v) = parse_llsd_vec3(data, "scale", "scale_x", "scale_y", "scale_z") {
+        return Some(glam::Vec3::new(
+            v.x.clamp(MIN_PRIM_SCALE, MAX_PRIM_SCALE),
+            v.y.clamp(MIN_PRIM_SCALE, MAX_PRIM_SCALE),
+            v.z.clamp(MIN_PRIM_SCALE, MAX_PRIM_SCALE),
+        ));
+    }
+    if data.has("scale") {
+        let s = data.get("scale").as_f32();
+        if s > 0.0 {
+            let clamped = s.clamp(MIN_PRIM_SCALE, MAX_PRIM_SCALE);
+            return Some(glam::Vec3::splat(clamped));
+        }
+    }
+    None
+}
+
+fn parse_llsd_quat(data: &Llsd, key: &str) -> Option<glam::Quat> {
+    if data.has(key) && data.get(key).is_array() {
+        let arr = data.get(key).as_array();
+        if arr.len() == 4 {
+            let q = glam::Quat::from_xyzw(
+                arr[0].as_f32(),
+                arr[1].as_f32(),
+                arr[2].as_f32(),
+                arr[3].as_f32(),
+            );
+            if q.length_squared() > 1e-6 {
+                return Some(q.normalize());
+            }
+        } else if arr.len() == 3 {
+            return Some(glam::Quat::from_euler(
+                glam::EulerRot::XYZ,
+                arr[0].as_f32(),
+                arr[1].as_f32(),
+                arr[2].as_f32(),
+            ));
+        }
+    }
+    None
+}
+
 fn handle_objects(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
     match op {
         "getNearbyObjects" | "get_nearby" | "nearby" | "list" => {
@@ -2063,14 +2173,19 @@ fn handle_objects(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
             let found = app.world.objects.iter().find(|(_, obj)| {
                 (local_id > 0 && obj.key.local_id == local_id)
                     || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
-            });
+            }).map(|(_, obj)| (obj.key, obj.full_id));
 
-            if let Some((_, obj)) = found {
+            if let Some((key, uuid)) = found {
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::Select {
+                    handle: key.region,
+                    local_ids: vec![key.local_id],
+                }));
                 let reply = llsd_map! {
                     "status" => true,
                     "selected" => true,
-                    "local_id" => obj.key.local_id as i32,
-                    "uuid" => obj.full_id.to_string(),
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                    "region" => Llsd::Real(key.region as f64),
                 };
                 send_reply(app, reply_pump, reply, data);
             } else {
@@ -2082,11 +2197,352 @@ fn handle_objects(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
             }
         }
         "deselect" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            if local_id > 0 || parsed_uuid.is_some() {
+                let found = app.world.objects.iter().find(|(_, obj)| {
+                    (local_id > 0 && obj.key.local_id == local_id)
+                        || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+                }).map(|(_, obj)| (obj.key, obj.full_id));
+
+                if let Some((key, uuid)) = found {
+                    app.send(NetCommand::Build(aurora_net::build::BuildCmd::Deselect {
+                        handle: key.region,
+                        local_ids: vec![key.local_id],
+                    }));
+                    let reply = llsd_map! {
+                        "status" => true,
+                        "deselected" => true,
+                        "local_id" => key.local_id as i32,
+                        "uuid" => uuid.to_string(),
+                    };
+                    send_reply(app, reply_pump, reply, data);
+                    return;
+                }
+            }
+
             let reply = llsd_map! {
                 "status" => true,
                 "deselected" => true,
             };
             send_reply(app, reply_pump, reply, data);
+        }
+        "createObject" | "rezPrim" | "create_prim" | "create" | "rez" => {
+            if !app.in_world() {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Viewer not active in world",
+                };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            }
+            let Some(handle) = app.world.main_region else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "No active region handle for rez",
+                };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            };
+
+            let shape_idx = if data.has("shape_index") {
+                (data.get("shape_index").as_i32() as usize).min(12)
+            } else if data.has("shape") {
+                prim_shape_index(data.get("shape").as_str())
+            } else {
+                0
+            };
+
+            let pos = parse_llsd_vec3(data, "position", "x", "y", "z").unwrap_or_else(|| {
+                let (sin_yaw, cos_yaw) = app.world.agent.yaw.sin_cos();
+                let forward = glam::Vec3::new(cos_yaw, sin_yaw, 0.0);
+                app.world.agent.position + forward * 2.0
+            });
+
+            let scale = parse_llsd_scale(data).unwrap_or(glam::Vec3::splat(0.5));
+            let rotation = parse_llsd_quat(data, "rotation").unwrap_or(glam::Quat::IDENTITY);
+
+            let material = if data.has("material") {
+                data.get("material").as_i32() as u8
+            } else {
+                1 // LL_MCODE_METAL
+            };
+
+            let shape_raw = crate::build::shapes::shapes()[shape_idx].raw();
+            let new_prim = aurora_net::build::NewPrim {
+                handle,
+                group_id: app.world.group_for_rez(app.settings.build.rez_under_land_group),
+                pcode: aurora_prim::params::LL_PCODE_VOLUME,
+                material,
+                add_flags: if pos.z > 4096.0 { 0x02 } else { 0 },
+                shape: shape_raw,
+                ray_start: pos,
+                ray_end: pos,
+                ray_target: Uuid::nil(),
+                ray_end_is_intersection: false,
+                bypass_raycast: true,
+                scale,
+                rotation,
+                state: 0,
+            };
+
+            app.send(NetCommand::Build(aurora_net::build::BuildCmd::Add(Box::new(new_prim))));
+
+            let reply = llsd_map! {
+                "status" => true,
+                "created" => true,
+                "shape_index" => shape_idx as i32,
+                "position" => Llsd::Array(vec![
+                    Llsd::Real(pos.x as f64),
+                    Llsd::Real(pos.y as f64),
+                    Llsd::Real(pos.z as f64),
+                ]),
+                "scale" => Llsd::Array(vec![
+                    Llsd::Real(scale.x as f64),
+                    Llsd::Real(scale.y as f64),
+                    Llsd::Real(scale.z as f64),
+                ]),
+                "region" => Llsd::Real(handle as f64),
+            };
+            send_reply(app, reply_pump, reply, data);
+        }
+        "deleteObject" | "delete" | "derez" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                let trash = app.world
+                    .inventory
+                    .folders
+                    .values()
+                    .find(|f| !f.library && f.info.type_default == 14)
+                    .map(|f| f.info.id)
+                    .unwrap_or_default();
+
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::DeRez {
+                    handle: key.region,
+                    local_ids: vec![key.local_id],
+                    destination: aurora_net::build::derez::TRASH,
+                    destination_id: trash,
+                    group_id: app.world.groups.active,
+                }));
+                app.world.ui_sounds.push(crate::ui_sound::UiSound::ObjectDelete);
+
+                let reply = llsd_map! {
+                    "status" => true,
+                    "deleted" => true,
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found in world to delete",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
+        }
+        "setTransform" | "transform" | "set_transform" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                let position = parse_llsd_vec3(data, "position", "x", "y", "z");
+                let scale = parse_llsd_scale(data);
+                let rotation = parse_llsd_quat(data, "rotation");
+
+                let update = aurora_net::build::TransformUpdate {
+                    local_id: key.local_id,
+                    position,
+                    rotation,
+                    scale,
+                    linked: data.get("linked").as_bool(),
+                    uniform: data.get("uniform").as_bool(),
+                };
+
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::Transform {
+                    handle: key.region,
+                    updates: vec![update],
+                }));
+
+                let reply = llsd_map! {
+                    "status" => true,
+                    "transformed" => true,
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                    "has_position" => position.is_some(),
+                    "has_rotation" => rotation.is_some(),
+                    "has_scale" => scale.is_some(),
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found to transform",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
+        }
+        "setName" | "set_name" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let name = data.get("name").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::SetName {
+                    handle: key.region,
+                    local_id: key.local_id,
+                    name: name.to_string(),
+                }));
+                let reply = llsd_map! {
+                    "status" => true,
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                    "name" => name,
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found to set name",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
+        }
+        "setDescription" | "set_description" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let desc = data.get("description").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::SetDescription {
+                    handle: key.region,
+                    local_id: key.local_id,
+                    description: desc.to_string(),
+                }));
+                let reply = llsd_map! {
+                    "status" => true,
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                    "description" => desc,
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found to set description",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
+        }
+        "duplicate" | "duplicateObject" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                let offset = parse_llsd_vec3(data, "offset", "offset_x", "offset_y", "offset_z")
+                    .unwrap_or(glam::Vec3::new(0.0, 0.0, 1.0));
+
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::Duplicate {
+                    handle: key.region,
+                    local_ids: vec![key.local_id],
+                    offset,
+                    flags: 0,
+                    group_id: app.world.groups.active,
+                }));
+
+                let reply = llsd_map! {
+                    "status" => true,
+                    "duplicated" => true,
+                    "source_local_id" => key.local_id as i32,
+                    "source_uuid" => uuid.to_string(),
+                    "offset" => Llsd::Array(vec![
+                        Llsd::Real(offset.x as f64),
+                        Llsd::Real(offset.y as f64),
+                        Llsd::Real(offset.z as f64),
+                    ]),
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found to duplicate",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
+        }
+        "setFlags" | "set_flags" => {
+            let local_id = data.get("local_id").as_i32() as u32;
+            let uuid_str = data.get("uuid").as_str();
+            let parsed_uuid = uuid_str.parse::<Uuid>().ok();
+
+            let found = app.world.objects.iter().find(|(_, obj)| {
+                (local_id > 0 && obj.key.local_id == local_id)
+                    || (parsed_uuid.is_some() && Some(obj.full_id) == parsed_uuid)
+            }).map(|(_, obj)| (obj.key, obj.full_id));
+
+            if let Some((key, uuid)) = found {
+                let physics = data.get("physics").as_bool();
+                let temporary = data.get("temporary").as_bool();
+                let phantom = data.get("phantom").as_bool();
+
+                app.send(NetCommand::Build(aurora_net::build::BuildCmd::SetFlags {
+                    handle: key.region,
+                    local_id: key.local_id,
+                    physics,
+                    temporary,
+                    phantom,
+                }));
+
+                let reply = llsd_map! {
+                    "status" => true,
+                    "local_id" => key.local_id as i32,
+                    "uuid" => uuid.to_string(),
+                    "physics" => physics,
+                    "temporary" => temporary,
+                    "phantom" => phantom,
+                };
+                send_reply(app, reply_pump, reply, data);
+            } else {
+                let reply = llsd_map! {
+                    "status" => false,
+                    "error" => "Object not found to set flags",
+                };
+                send_reply(app, reply_pump, reply, data);
+            }
         }
         _ => {
             let reply = llsd_map! {
