@@ -242,7 +242,7 @@ pub struct App {
     palette: Palette,
     pub(crate) net: NetClient,
     pub(crate) gfx: Option<Gfx>,
-    egui_ctx: egui::Context,
+    pub(crate) egui_ctx: egui::Context,
     logo: Option<egui::TextureHandle>,
     logo_rx: Option<crossbeam_channel::Receiver<LogoData>>,
     pub(crate) world: World,
@@ -1603,7 +1603,7 @@ impl App {
         }
     }
 
-    fn send(&mut self, cmd: NetCommand) {
+    pub(crate) fn send(&mut self, cmd: NetCommand) {
         self.send_from(cmd, uuid::Uuid::nil());
     }
 

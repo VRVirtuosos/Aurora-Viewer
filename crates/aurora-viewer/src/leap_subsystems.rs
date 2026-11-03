@@ -13,6 +13,7 @@ use aurora_llsd::{llsd_map, Llsd, Map};
 use aurora_net::{ChatType, NetCommand, NetEvent};
 
 use crate::app::{App, Screen};
+use crate::world::notifications::{Data, Kind, Response};
 
 /// Initialize LeapManager from command-line arguments.
 pub fn init_leap() -> Option<LeapManager> {
@@ -78,6 +79,8 @@ pub fn register_default_pumps(manager: &mut LeapManager) {
         "animations",
         "LLVoice",
         "voice",
+        "LLNotifications",
+        "notifications",
         "LLLeapListener",
         "leap_listener",
     ] {
@@ -340,7 +343,25 @@ pub fn register_subsystem_apis(manager: &mut LeapManager) {
     );
     manager.register_api(voice_api);
 
-    // 14. LLLeapListener
+    // 14. LLNotifications
+    let mut notif_api = ApiMetadata::new("LLNotifications", "Dialog notifications, alerts, offers, and script permissions");
+    notif_api.add_operation(
+        OperationMetadata::new("getNotifications", "Enumerate active pending notifications, alerts, and script dialogs")
+            .with_optional(&["reqid", "reply"]),
+    );
+    notif_api.add_operation(
+        OperationMetadata::new("respond", "Respond to or answer a notification by id")
+            .with_required(&["id"])
+            .with_optional(&["response", "action", "button", "button_index", "text", "reqid", "reply"]),
+    );
+    notif_api.add_operation(
+        OperationMetadata::new("dismiss", "Dismiss or cancel a notification by id")
+            .with_required(&["id"])
+            .with_optional(&["reqid", "reply"]),
+    );
+    manager.register_api(notif_api);
+
+    // 15. LLLeapListener
     let mut listener_api = ApiMetadata::new("LLLeapListener", "Dynamic pump subscription and listener management");
     listener_api.add_operation(
         OperationMetadata::new("listen", "Register a listener callback forwarding events from a source pump")
@@ -403,6 +424,9 @@ pub fn dispatch_subsystem_message(app: &mut App, msg: LeapMessage) {
         }
         "LLVoice" | "voice" => {
             handle_voice(app, op, &msg.data, &reply_pump);
+        }
+        "LLNotifications" | "notifications" => {
+            handle_notifications(app, op, &msg.data, &reply_pump);
         }
         "LLLeapListener" | "leap_listener" => {
             handle_leap_listener(app, op, &msg.data, &reply_pump);
@@ -691,10 +715,19 @@ fn handle_chat(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
 fn handle_agent(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
     match op {
         "get" | "getAgent" | "get_agent" | "getPosition" | "get_position" => {
-            let pos = app.world.agent.position;
-            let region_name = app.world.region_name();
-            let slurl = format!("secondlife://{}/{:.0}/{:.0}/{:.0}", region_name, pos.x, pos.y, pos.z);
+            let in_world = app.in_world();
+            let pos = if in_world { app.world.agent.position } else { glam::Vec3::ZERO };
+            let region_name = if in_world { app.world.region_name() } else { String::new() };
+            let slurl = if in_world {
+                format!("secondlife://{}/{:.0}/{:.0}/{:.0}", region_name, pos.x, pos.y, pos.z)
+            } else {
+                String::new()
+            };
             let mut reply_map = llsd_map! {
+                "status" => true,
+                "in_world" => in_world,
+                "logged_in" => in_world,
+                "agent_id" => app.world.agent_id.to_string(),
                 "position" => Llsd::Array(vec![
                     Llsd::Real(pos.x as f64),
                     Llsd::Real(pos.y as f64),
@@ -1132,7 +1165,16 @@ fn handle_camera(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
         }
         "look_at_avatar" | "lookAtAvatar" => {
             let agent_head = app.world.agent.position + glam::Vec3::Z * 1.0;
-            app.camera.set_manual_view(None, Some(agent_head), None);
+            // If camera is too distant (e.g. initial login view > 50m away), bring it close
+            let current_pos = app.camera.position;
+            let dist_to_agent = current_pos.distance(app.world.agent.position);
+            let eye_pos = if dist_to_agent > 50.0 || !current_pos.is_finite() {
+                let yaw = app.world.agent.yaw;
+                Some(app.world.agent.position - glam::Vec3::new(3.5 * yaw.cos(), 3.5 * yaw.sin(), -1.2))
+            } else {
+                None
+            };
+            app.camera.set_manual_view(eye_pos, Some(agent_head), None);
             if let Some(gfx) = &mut app.gfx {
                 gfx.window.request_redraw();
             }
@@ -1251,13 +1293,13 @@ fn handle_camera(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
 
             let (cam, tgt, fov) = match preset_name {
                 // Front Views (facing the avatar from the front)
-                "front_portrait" | "portrait" => {
+                "front_portrait" | "portrait" | "tight_portrait" | "tight" => {
                     let dist = 1.6_f32;
                     let cx = ax + dist * yaw.cos();
                     let cy = ay + dist * yaw.sin();
                     (glam::Vec3::new(cx, cy, az + 1.2), glam::Vec3::new(ax, ay, az + 1.2), 40.0_f32.to_radians())
                 }
-                "front_medium" | "front_torso" => {
+                "front_medium" | "front_torso" | "medium" | "torso" => {
                     let dist = 2.6_f32;
                     let cx = ax + dist * yaw.cos();
                     let cy = ay + dist * yaw.sin();
@@ -1269,14 +1311,14 @@ fn handle_camera(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
                     let cy = ay + dist * yaw.sin();
                     (glam::Vec3::new(cx, cy, az + 0.7), glam::Vec3::new(ax, ay, az + 0.5), 55.0_f32.to_radians())
                 }
-                "front_left_angle" | "front_three_quarter_left" => {
+                "front_left_angle" | "front_three_quarter_left" | "three_quarter_left" => {
                     let angle = yaw + 45.0_f32.to_radians();
                     let dist = 2.4_f32;
                     let cx = ax + dist * angle.cos();
                     let cy = ay + dist * angle.sin();
                     (glam::Vec3::new(cx, cy, az + 1.1), glam::Vec3::new(ax, ay, az + 1.0), 45.0_f32.to_radians())
                 }
-                "front_right_angle" | "front_three_quarter_right" => {
+                "front_right_angle" | "front_three_quarter_right" | "three_quarter_right" => {
                     let angle = yaw - 45.0_f32.to_radians();
                     let dist = 2.4_f32;
                     let cx = ax + dist * angle.cos();
@@ -1284,39 +1326,39 @@ fn handle_camera(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
                     (glam::Vec3::new(cx, cy, az + 1.1), glam::Vec3::new(ax, ay, az + 1.0), 45.0_f32.to_radians())
                 }
                 // Rear Views (behind the avatar, looking forward)
-                "rear_third_person" | "rear_follow" | "full_body" => {
+                "rear_third_person" | "rear_follow" | "full_body" | "full_body_shot" | "third_person" => {
                     let dist = 3.8_f32;
                     let cx = ax - dist * yaw.cos();
                     let cy = ay - dist * yaw.sin();
                     (glam::Vec3::new(cx, cy, az + 0.8), glam::Vec3::new(ax, ay, az + 0.5), 55.0_f32.to_radians())
                 }
-                "rear_portrait" | "rear_over_shoulder" => {
+                "rear_portrait" | "rear_over_shoulder" | "over_the_shoulder" | "over_shoulder" => {
                     let dist = 1.6_f32;
                     let cx = ax - dist * yaw.cos();
                     let cy = ay - dist * yaw.sin();
                     (glam::Vec3::new(cx, cy, az + 1.2), glam::Vec3::new(ax + 2.0 * yaw.cos(), ay + 2.0 * yaw.sin(), az + 1.2), 40.0_f32.to_radians())
                 }
-                "wide_landscape" | "rear_wide_landscape" => {
+                "wide_landscape" | "rear_wide_landscape" | "wide" | "landscape" => {
                     let dist = 14.0_f32;
                     let cx = ax - dist * yaw.cos();
                     let cy = ay - dist * yaw.sin();
                     (glam::Vec3::new(cx, cy, az + 4.5), glam::Vec3::new(ax, ay, az + 1.0), 80.0_f32.to_radians())
                 }
                 // Profile Views
-                "profile_left" => {
+                "profile_left" | "left_profile" => {
                     let dist = 2.5_f32;
                     let cx = ax - dist * yaw.sin();
                     let cy = ay + dist * yaw.cos();
                     (glam::Vec3::new(cx, cy, az + 1.1), glam::Vec3::new(ax, ay, az + 1.1), 45.0_f32.to_radians())
                 }
-                "profile_right" => {
+                "profile_right" | "right_profile" => {
                     let dist = 2.5_f32;
                     let cx = ax + dist * yaw.sin();
                     let cy = ay - dist * yaw.cos();
                     (glam::Vec3::new(cx, cy, az + 1.1), glam::Vec3::new(ax, ay, az + 1.1), 45.0_f32.to_radians())
                 }
                 // Overhead / Top-down
-                "overhead" | "birds_eye" => {
+                "overhead" | "birds_eye" | "birds_eye_overhead" | "top_down" => {
                     (glam::Vec3::new(ax, ay, az + 35.0), glam::Vec3::new(ax, ay, az), 75.0_f32.to_radians())
                 }
                 _ => (app.camera.position, app.camera.target, app.camera.fov_y),
@@ -2352,6 +2394,220 @@ fn handle_leap_listener(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) 
         _ => {
             let reply = llsd_map! {
                 "error" => format!("Unknown operation '{op}' for LLLeapListener"),
+            };
+            send_reply(app, reply_pump, reply, data);
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// LLNotifications Subsystem Handler
+// ---------------------------------------------------------------------------
+
+fn handle_notifications(app: &mut App, op: &str, data: &Llsd, reply_pump: &str) {
+    match op {
+        "get" | "getNotifications" | "list" | "" => {
+            let mut list_val = Vec::new();
+            for n in &app.world.notifications.list {
+                let kind_str = match n.kind {
+                    Kind::Info => "info",
+                    Kind::Alert => "alert",
+                    Kind::Teleport => "teleport",
+                    Kind::Friendship => "friendship",
+                    Kind::Inventory => "inventory",
+                    Kind::Group => "group",
+                    Kind::Script => "script",
+                    Kind::Permissions => "permissions",
+                    Kind::Url => "url",
+                    Kind::Presence => "presence",
+                    Kind::Message => "message",
+                    Kind::Call => "call",
+                };
+
+                let mut n_map = llsd_map! {
+                    "id" => n.id as f64,
+                    "id_str" => n.id.to_string(),
+                    "kind" => kind_str,
+                    "title" => n.title.clone(),
+                    "body" => n.body.clone(),
+                    "interactive" => n.interactive(),
+                    "stays_until_answered" => n.stays_until_answered(),
+                };
+
+                match &n.data {
+                    Data::Dialog { object, object_name, channel, buttons, own_object, .. } => {
+                        n_map.insert("type".to_string(), Llsd::String("dialog".to_string()));
+                        n_map.insert("object".to_string(), Llsd::String(object.to_string()));
+                        n_map.insert("object_name".to_string(), Llsd::String(object_name.clone()));
+                        n_map.insert("channel".to_string(), Llsd::Integer(*channel));
+                        n_map.insert("own_object".to_string(), Llsd::Boolean(*own_object));
+                        let btns: Vec<Llsd> = buttons.iter().map(|b| Llsd::String(b.clone())).collect();
+                        n_map.insert("buttons".to_string(), Llsd::Array(btns));
+                    }
+                    Data::TextBox { object, channel, .. } => {
+                        n_map.insert("type".to_string(), Llsd::String("text_box".to_string()));
+                        n_map.insert("object".to_string(), Llsd::String(object.to_string()));
+                        n_map.insert("channel".to_string(), Llsd::Integer(*channel));
+                    }
+                    Data::Permissions { task, item, questions, .. } => {
+                        n_map.insert("type".to_string(), Llsd::String("permissions".to_string()));
+                        n_map.insert("task".to_string(), Llsd::String(task.to_string()));
+                        n_map.insert("item".to_string(), Llsd::String(item.to_string()));
+                        n_map.insert("questions".to_string(), Llsd::Integer(*questions));
+                        let perms: Vec<Llsd> = crate::world::notifications::permission_lines(*questions)
+                            .into_iter()
+                            .map(|s| Llsd::String(s.to_string()))
+                            .collect();
+                        n_map.insert("permission_names".to_string(), Llsd::Array(perms));
+                    }
+                    Data::Inventory { from, tx: _, asset_type, object, task, .. } => {
+                        n_map.insert("type".to_string(), Llsd::String("inventory_offer".to_string()));
+                        n_map.insert("from".to_string(), Llsd::String(from.to_string()));
+                        n_map.insert("object".to_string(), Llsd::String(object.to_string()));
+                        n_map.insert("asset_type".to_string(), Llsd::Integer(*asset_type as i32));
+                        n_map.insert("task".to_string(), Llsd::Boolean(*task));
+                    }
+                    Data::Group { group, tx: _, offline } => {
+                        n_map.insert("type".to_string(), Llsd::String("group_invite".to_string()));
+                        n_map.insert("group".to_string(), Llsd::String(group.to_string()));
+                        n_map.insert("offline".to_string(), Llsd::Boolean(*offline));
+                    }
+                    Data::Url(url) => {
+                        n_map.insert("type".to_string(), Llsd::String("url".to_string()));
+                        n_map.insert("url".to_string(), Llsd::String(url.clone()));
+                    }
+                    _ => {}
+                }
+
+                list_val.push(n_map);
+            }
+
+            let reply = llsd_map! {
+                "status" => true,
+                "count" => list_val.len() as i32,
+                "notifications" => Llsd::Array(list_val),
+            };
+            send_reply(app, reply_pump, reply, data);
+        }
+        "respond" | "answer" => {
+            let id = if data.has("id") {
+                data.get("id").as_u64()
+            } else {
+                0
+            };
+
+            if id == 0 {
+                let reply = llsd_map! { "status" => false, "error" => "Missing or invalid 'id' parameter" };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            }
+
+            // Find notification to determine response type
+            let notif = app.world.notifications.list.iter().find(|n| n.id == id).cloned();
+            let Some(notif) = notif else {
+                let reply = llsd_map! { "status" => false, "error" => format!("Notification id {id} not found") };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            };
+
+            let resp_str = if data.has("response") {
+                data.get("response").as_str().to_lowercase()
+            } else if data.has("action") {
+                data.get("action").as_str().to_lowercase()
+            } else {
+                "accept".to_string()
+            };
+
+            let response_enum = if resp_str == "decline" || resp_str == "no" || resp_str == "reject" {
+                Response::Decline
+            } else if resp_str == "dismiss" || resp_str == "cancel" || resp_str == "close" {
+                Response::Dismiss
+            } else if resp_str == "block" || resp_str == "mute" {
+                Response::Block
+            } else if resp_str == "block_experience" {
+                Response::BlockExperience
+            } else if resp_str == "open" {
+                Response::Open
+            } else if resp_str == "url" || resp_str == "open_url" {
+                Response::OpenUrl
+            } else if data.has("button") || data.has("button_index") || resp_str == "button" {
+                let idx = if data.has("button_index") {
+                    data.get("button_index").as_i32() as usize
+                } else if data.has("button") && matches!(data.get("button"), Llsd::Integer(_) | Llsd::Real(_)) {
+                    data.get("button").as_i32() as usize
+                } else if let Data::Dialog { buttons, .. } = &notif.data {
+                    let label = data.get("button").as_str();
+                    buttons.iter().position(|b| b == label).unwrap_or(0)
+                } else {
+                    0
+                };
+                Response::Button(idx)
+            } else if data.has("text") || resp_str == "text" {
+                if let Some(n_mut) = app.world.notifications.list.iter_mut().find(|n| n.id == id) {
+                    if data.has("text") {
+                        n_mut.text = data.get("text").as_str().to_string();
+                    }
+                }
+                Response::SendText
+            } else {
+                Response::Accept
+            };
+
+            let (cmds, url) = app.world.respond_notification(id, response_enum);
+            for cmd in cmds {
+                app.send(cmd);
+            }
+            if let Some(u) = url {
+                app.egui_ctx.open_url(egui::OpenUrl::new_tab(u));
+            }
+
+            let reply = llsd_map! {
+                "status" => true,
+                "id" => id as f64,
+                "responded" => true,
+            };
+            send_reply(app, reply_pump, reply, data);
+        }
+        "dismiss" | "cancel" => {
+            let id = if data.has("id") {
+                data.get("id").as_u64()
+            } else {
+                0
+            };
+
+            if id == 0 {
+                let reply = llsd_map! { "status" => false, "error" => "Missing or invalid 'id' parameter" };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            }
+
+            let notif = app.world.notifications.list.iter().find(|n| n.id == id).cloned();
+            let Some(_notif) = notif else {
+                let reply = llsd_map! { "status" => false, "error" => format!("Notification id {id} not found") };
+                send_reply(app, reply_pump, reply, data);
+                return;
+            };
+
+            let (cmds, url) = app.world.respond_notification(id, Response::Dismiss);
+            for cmd in cmds {
+                app.send(cmd);
+            }
+            if let Some(u) = url {
+                app.egui_ctx.open_url(egui::OpenUrl::new_tab(u));
+            }
+
+            let reply = llsd_map! {
+                "status" => true,
+                "id" => id as f64,
+                "dismissed" => true,
+            };
+            send_reply(app, reply_pump, reply, data);
+        }
+        other => {
+            let reply = llsd_map! {
+                "status" => false,
+                "error" => format!("Unknown operation '{other}' for LLNotifications pump"),
             };
             send_reply(app, reply_pump, reply, data);
         }
