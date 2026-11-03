@@ -102,6 +102,7 @@ def main() -> int:
             for line in output.splitlines()[-20:]:
                 print(f"    {line}")
             print("  ----------------------")
+        time.sleep(1.0)
 
     total_duration = time.time() - total_t0
 
