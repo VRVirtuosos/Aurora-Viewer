@@ -48,3 +48,7 @@ Thumbs.db
 
 # Per-task scratch files (agents)
 /.scratch/
+
+/snapshots/
+__pycache__/
+*.pyc
