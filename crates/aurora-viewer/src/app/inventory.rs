@@ -816,11 +816,11 @@ impl App {
         }
     }
 
-    pub(super) fn apply_appearance_action(&mut self, action: crate::world::appearance::Action) {
+    pub(crate) fn apply_appearance_action(&mut self, action: crate::world::appearance::Action) {
         self.apply_appearance_action_from(action, Uuid::nil());
     }
 
-    pub(super) fn apply_appearance_action_from(&mut self, action: crate::world::appearance::Action, actor: Uuid) {
+    pub(crate) fn apply_appearance_action_from(&mut self, action: crate::world::appearance::Action, actor: Uuid) {
         let allow_recovery = self
             .appearance_ui
             .pending

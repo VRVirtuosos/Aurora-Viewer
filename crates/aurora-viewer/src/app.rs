@@ -125,18 +125,18 @@ mod wearable_editor;
 mod world_click_demo;
 mod worn_demo;
 
-enum Screen {
+pub(crate) enum Screen {
     Login,
     Loading { since: Instant },
     World,
 }
 
-struct Gfx {
-    window: Arc<Window>,
+pub(crate) struct Gfx {
+    pub(crate) window: Arc<Window>,
     /// Revealed only once the renderer has presented its first image.
     shown: bool,
     maximize_on_show: bool,
-    renderer: Renderer,
+    pub(crate) renderer: Renderer,
     egui_state: egui_winit::State,
 }
 
@@ -230,16 +230,16 @@ struct LogoData {
 }
 
 pub struct App {
-    settings: Settings,
+    pub(crate) settings: Settings,
     disk_cache: crate::cache::DiskCache,
     skin: Skin,
     palette: Palette,
-    net: NetClient,
-    gfx: Option<Gfx>,
+    pub(crate) net: NetClient,
+    pub(crate) gfx: Option<Gfx>,
     egui_ctx: egui::Context,
     logo: Option<egui::TextureHandle>,
     logo_rx: Option<crossbeam_channel::Receiver<LogoData>>,
-    world: World,
+    pub(crate) world: World,
     bridge_runtime: crate::world::bridge::Bridge,
     native_anchor: crate::movement::movelock::Controller,
     anchor_stands: crate::ao::anchor::StandCheck,
@@ -256,7 +256,7 @@ pub struct App {
     probes: crate::scene::probes::ProbeManager,
     /// Throttle of the "sky frame" log line.
     sky_log: crate::world::env::SkyLog,
-    camera: Camera,
+    pub(crate) camera: Camera,
     input: MoveInput,
     joystick: joystick::State,
     /// Keys and bindable mouse buttons held down.
@@ -267,8 +267,8 @@ pub struct App {
     /// (LLKeyboardMacOSX::currentMask). Clicks, the wheel and media keep
     /// it separate (aurora_media::Modifiers::command).
     command: bool,
-    screen: Screen,
-    login_form: LoginForm,
+    pub(crate) screen: Screen,
+    pub(crate) login_form: LoginForm,
     // Bug report form (disabled, see main.rs):
     // bug_report: ui::bug_report::BugReportUi,
     login_progress: Option<(String, f32)>,
@@ -326,8 +326,8 @@ pub struct App {
     egui_hand_over: EguiHandOver,
     last_frame: Instant,
     /// Duration of the frame before the last one (s).
-    prev_dt: f32,
-    start: Instant,
+    pub(crate) prev_dt: f32,
+    pub(crate) start: Instant,
     right_drag: bool,
     /// The camera's vertical angle last sent in AgentFOV.
     sent_fov: f32,
@@ -376,7 +376,7 @@ pub struct App {
     /// joysticks hold this frame, and its "Object view": a left click in the
     /// world focuses the camera, as with Alt (LLToolCamera).
     controls_ui: ui::controls::ControlsUi,
-    controls_held: Vec<Action>,
+    pub(crate) controls_held: Vec<Action>,
     /// Its free camera joysticks this frame: move, look.
     controls_free: (egui::Vec2, egui::Vec2),
     object_view: bool,
@@ -453,7 +453,7 @@ pub struct App {
     last_vertical_flags: u32,
     last_render: RenderStats,
     empty_lists: DrawLists,
-    quit_at: Option<Instant>,
+    pub(crate) quit_at: Option<Instant>,
     exit_prompt: ui::exit::ExitPrompt,
     /// saves the window layout shortly after it changes (ui/layout.rs)
     layout_autosave: ui::layout::Autosave,
@@ -506,7 +506,7 @@ pub struct App {
     sim_console_input: ui::sim_console::ConsoleInput,
     loading_frac: f32,
     loading_target: f32,
-    frame_count: u64,
+    pub(crate) frame_count: u64,
     demo_rlva_frame: Option<u64>,
     rlva_login: crate::world::rlva::login::State,
     named_teleport: teleport_lookup::NamedTeleport,
@@ -839,6 +839,9 @@ pub struct App {
     /// AURORA_CAPTURE: file, frames to capture (several: one file each,
     /// `<name>-<frame>.png`), quit after the last one.
     capture: Option<(Vec<(u64, std::path::PathBuf)>, bool)>,
+    /// Active LEAP manager for automation, external scripts, and test runners.
+    pub leap: Option<aurora_leap::LeapManager>,
+    pub(crate) pending_leap_snapshot: Option<crate::leap_subsystems::PendingLeapSnapshot>,
 }
 
 /// The bandwidth setting, or AURORA_BANDWIDTH_KBPS for this launch: a value
@@ -1501,6 +1504,8 @@ impl App {
                     std::env::var_os("AURORA_CAPTURE_EXIT").is_some(),
                 )
             }),
+            leap: crate::leap_subsystems::init_leap(),
+            pending_leap_snapshot: None,
         }))
     }
 
@@ -2344,7 +2349,7 @@ impl App {
         self.net.send(cmd);
     }
 
-    fn in_world(&self) -> bool {
+    pub(crate) fn in_world(&self) -> bool {
         matches!(self.screen, Screen::World | Screen::Loading { .. })
     }
 
@@ -2404,7 +2409,7 @@ impl App {
 
     // ------------------------------------------------------------------ login
 
-    fn start_login(&mut self) {
+    pub(crate) fn start_login(&mut self) {
         // a previous session of this account may still be on the grid
         if self.hold_login() {
             return;
@@ -2655,6 +2660,10 @@ impl App {
     }
 
     fn on_app_event(&mut self, ev: NetEvent) {
+        if let Some(leap) = &self.leap {
+            crate::leap_subsystems::broadcast_net_event(leap, &ev);
+        }
+
         if matches!(&ev, NetEvent::AgentMovementComplete { .. })
             && let Some(recovery) = &mut self.follow_recovery
         {
@@ -3946,7 +3955,7 @@ impl App {
     }
 
     /// Voice transmission wanted (microphone button / push-to-talk).
-    fn talking(&self) -> bool {
+    pub(crate) fn talking(&self) -> bool {
         if self.minimized_mute.active || self.speak_denied().is_some() {
             false
         } else if self.settings.audio.mic_hold {
@@ -5455,7 +5464,7 @@ impl App {
     /// Navigation bar: teleport to a typed / pasted place (SLURL, Region/x/y/z,
     /// region name). The current region is reached directly, others through
     /// a map lookup by name.
-    fn teleport_to_text(&mut self, text: &str) {
+    pub(crate) fn teleport_to_text(&mut self, text: &str) {
         let Some(l) = crate::slurl::parse(text) else {
             self.world.system_notice(
                 aurora_i18n::tr!("app-destination-not-recognized"),
@@ -5496,7 +5505,7 @@ impl App {
         }
     }
 
-    fn teleport_to_location(&mut self, region: String, pos: Vec3) {
+    pub(crate) fn teleport_to_location(&mut self, region: String, pos: Vec3) {
         self.teleport_to_location_looking(region, pos, Vec3::X);
     }
 
@@ -6544,7 +6553,7 @@ impl App {
     /// LLAgent::toggleFlying → setFlying (indra/newview/llagent.cpp): only
     /// the FLY flag changes. No STOP with it: that flag brakes the avatar,
     /// and the fall must keep the flight's momentum, as in Firestorm.
-    fn toggle_fly(&mut self) {
+    pub(crate) fn toggle_fly(&mut self) {
         // LLAgent::setFlying: no takeoff where LLAgent::canFly says no (the
         // parcel's or the region's no-fly, RLVa @fly, seated); a flight
         // already under way may go on and always land
@@ -6556,6 +6565,28 @@ impl App {
         self.release_native_movelock();
         self.movement_runtime.cancel_water_exit();
         self.world.agent.flying = !self.world.agent.flying;
+    }
+
+    pub(crate) fn leap_walk_to(&mut self, target: glam::Vec3, run: bool) {
+        let agent = &self.world.agent;
+        if !target.is_finite() || self.native_anchor.blocks_walk(agent.seated, agent.ground_sit) {
+            return;
+        }
+        let was_running = self.autopilot.as_ref().is_some_and(|a| a.run);
+        self.world.following_avatar = None;
+        self.follow_recovery = None;
+        self.follow_ui.open = false;
+        let mut ap = crate::autopilot::AutoPilot::start(agent.position, target, run, std::time::Instant::now());
+        if agent.flying {
+            ap.set_flying(true, agent.position);
+        }
+        self.autopilot = Some(ap);
+        self.autopilot_stop_pending = false;
+        self.autopilot_flags = 0;
+        self.release_native_movelock();
+        if run != was_running {
+            self.sync_run();
+        }
     }
 
     /// A conversation the user opened (a contact, a name's menu, People)
@@ -7809,6 +7840,23 @@ impl App {
         }
 
         self.frame_profile.lap(Lap::Start);
+
+        // ---- LEAP subsystem message processing (time-bounded 4ms budget)
+        if self.leap.is_some() {
+            let t_leap = Instant::now();
+            loop {
+                let msg = match self.leap.as_mut() {
+                    Some(l) => l.try_recv(),
+                    None => None,
+                };
+                let Some(msg) = msg else { break; };
+                crate::leap_subsystems::dispatch_subsystem_message(self, msg);
+                if t_leap.elapsed() > Duration::from_millis(4) {
+                    break;
+                }
+            }
+        }
+
         // ---- network events (time-boxed)
         let t_ev = Instant::now();
         self.world.events_this_frame = 0;
@@ -9954,6 +10002,13 @@ impl App {
         // while this thread goes on with the next frame. The statistics
         // returned are those of the frame before; a frame that carries a
         // capture is waited for, its pixels are read in the tail below.
+        if let Some(snap) = &self.pending_leap_snapshot {
+            if snap.ui {
+                gfx.renderer.capture_request = true;
+            } else {
+                gfx.renderer.capture_scene = true;
+            }
+        }
         let lists = if self.in_world() { &self.scene.lists } else { &self.empty_lists };
         let stats = gfx.renderer.render(fp, lists, Some(egui_frame));
         self.photo_drawn(&mut gfx.renderer);
@@ -10519,6 +10574,16 @@ impl App {
                 if *exit && files.is_empty() {
                     self.quit_at = Some(Instant::now());
                 }
+            }
+        }
+        if let Some(snap) = self.pending_leap_snapshot.take() {
+            if let Some((w, h, px)) = gfx.renderer.captured.take() {
+                crate::leap_subsystems::finish_leap_snapshot(self, snap, w, h, px);
+            } else if snap.requested_at.elapsed() < std::time::Duration::from_secs(4) {
+                gfx.window.request_redraw();
+                self.pending_leap_snapshot = Some(snap);
+            } else {
+                crate::leap_subsystems::fail_leap_snapshot(self, snap, "Capture timed out waiting for rendered frame");
             }
         }
         let mut net = self.net.stats.snapshot();

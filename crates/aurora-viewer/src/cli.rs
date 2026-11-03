@@ -28,6 +28,10 @@ pub struct Cli {
     login: Mutex<Option<Login>>,
     help: bool,
     version: bool,
+    /// `--leap <command>`: run child process communicating via LEAP standard I/O pipes.
+    pub leap: Option<String>,
+    /// `--leap-stdio`: attach LEAP protocol directly to standard input/output.
+    pub leap_stdio: bool,
 }
 
 /// The grid named by `--grid` or `--loginuri`.
@@ -131,6 +135,14 @@ fn parse(args: impl Iterator<Item = String>) -> Cli {
             } else {
                 eprintln!("{}", aurora_i18n::tr!("cli-login-requires-three-values"));
             }
+        } else if let Some(v) = a.strip_prefix("--leap=") {
+            cli.leap = Some(v.to_owned());
+        } else if a == "--leap" {
+            if args.peek().is_some_and(|value| !value.starts_with('-')) {
+                cli.leap = args.next();
+            }
+        } else if a == "--leap-stdio" {
+            cli.leap_stdio = true;
         } else if let Some(v) = a.strip_prefix("--url=") {
             cli.url = Some(v.to_owned());
             break;
@@ -146,6 +158,7 @@ fn parse(args: impl Iterator<Item = String>) -> Cli {
     cli.title = cli.title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
     cli.language = cli.language.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
     cli.url = cli.url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+    cli.leap = cli.leap.map(|cmd| cmd.trim().to_owned()).filter(|cmd| !cmd.is_empty());
     cli
 }
 
@@ -371,5 +384,19 @@ mod tests {
         for value in ["0", "501", "-1", "nan"] {
             assert_eq!(parse_fps_limit(value), None);
         }
+    }
+
+    #[test]
+    fn leap_cli_switches() {
+        let cli_sub = parse(["--leap", "python test_harness.py"].map(String::from).into_iter());
+        assert_eq!(cli_sub.leap.as_deref(), Some("python test_harness.py"));
+        assert!(!cli_sub.leap_stdio);
+
+        let cli_eq = parse(["--leap=echo test"].map(String::from).into_iter());
+        assert_eq!(cli_eq.leap.as_deref(), Some("echo test"));
+
+        let cli_stdio = parse(["--leap-stdio"].map(String::from).into_iter());
+        assert!(cli_stdio.leap.is_none());
+        assert!(cli_stdio.leap_stdio);
     }
 }

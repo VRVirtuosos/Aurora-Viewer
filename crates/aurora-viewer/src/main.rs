@@ -53,6 +53,7 @@ mod interface_colors;
 mod joystick;
 mod keybinds;
 mod keywords;
+mod leap_subsystems;
 mod link_preview;
 mod link_trust;
 mod links;

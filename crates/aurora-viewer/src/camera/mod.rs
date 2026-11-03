@@ -259,10 +259,20 @@ struct Tool {
     steering: bool,
 }
 
+/// Persistent manual camera view override (e.g. set by LEAP LLCamera or scripting).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ManualView {
+    pub position: Vec3,
+    pub target: Vec3,
+    pub fov_y: f32,
+}
+
 #[derive(Clone)]
 pub struct Camera {
     pub mode: CameraMode,
     last_mode: CameraMode,
+    /// Persistent manual camera view override (e.g. set by LEAP LLCamera or scripting).
+    pub manual_view: Option<ManualView>,
     /// Final camera position and point looked at (render space).
     pub position: Vec3,
     pub target: Vec3,
@@ -385,6 +395,7 @@ impl Default for Camera {
             own: Uuid::nil(),
             dt: 0.0,
             initialized: false,
+            manual_view: None,
             free: None,
             flycam: None,
             flycam_lens: None,
@@ -498,7 +509,8 @@ impl Camera {
         if !s.enable_mouselook || self.mouselook() {
             return;
         }
-        // mouselook ends the free camera (the flycam's toggle the other way)
+        // mouselook ends the free camera and manual view
+        self.manual_view = None;
         self.free = None;
         self.clear_flycam();
         // the view keeps its direction: the avatar turns to it
@@ -853,6 +865,7 @@ impl Camera {
         if movement && !s.reset_on_movement {
             return;
         }
+        self.manual_view = None;
         self.clear_flycam();
         if change_camera {
             self.change_to_default(agent, s);
@@ -880,6 +893,7 @@ impl Camera {
 
     /// handle_reset_view (Escape, "Reset camera").
     pub fn handle_reset_view(&mut self, agent: &mut AgentState, s: &CameraSettings) {
+        self.manual_view = None;
         if !s.reset_view_turns_avatar {
             // setFocusOnAvatar(true, false, false): the avatar keeps its direction
             if !self.focus_on_avatar {
@@ -900,6 +914,44 @@ impl Camera {
 
     pub fn free_mut(&mut self) -> Option<&mut FreeCamera> {
         self.free.as_mut()
+    }
+
+    /// Check whether a manual view override is active.
+    pub fn is_manual_view(&self) -> bool {
+        self.manual_view.is_some()
+    }
+
+    /// Set a persistent manual camera view (position, target, and optional fov_y).
+    pub fn set_manual_view(
+        &mut self,
+        position: Option<Vec3>,
+        target: Option<Vec3>,
+        fov_y: Option<f32>,
+    ) {
+        let current_pos = self.manual_view.map(|m| m.position).unwrap_or(self.position);
+        let current_target = self.manual_view.map(|m| m.target).unwrap_or(self.target);
+        let current_fov = self.manual_view.map(|m| m.fov_y).unwrap_or(self.fov_y);
+
+        let new_pos = position.unwrap_or(current_pos);
+        let new_target = target.unwrap_or(current_target);
+        let new_fov = fov_y.unwrap_or(current_fov);
+
+        let manual = ManualView {
+            position: new_pos,
+            target: new_target,
+            fov_y: new_fov,
+        };
+
+        self.manual_view = Some(manual);
+        self.position = new_pos;
+        self.target = new_target;
+        self.fov_y = new_fov;
+        self.anim = None;
+    }
+
+    /// Clear the manual camera override and return to normal avatar-follow view.
+    pub fn clear_manual_view(&mut self) {
+        self.manual_view = None;
     }
 
     /// On toggle-off the normal camera takes the exact view back, still
@@ -995,6 +1047,7 @@ impl Camera {
     /// the orbit, the pitch and the zoom (resetView of process_teleport_local).
     pub fn on_teleport_arrival(&mut self, s: &CameraSettings) {
         self.clear_flycam();
+        self.manual_view = None;
         // a free camera stays in the region it left
         self.free = None;
         self.focus_on_avatar = true;
@@ -1398,6 +1451,13 @@ impl Camera {
 
     /// Once per frame, after the avatar moved (LLAgentCamera::updateCamera).
     pub fn update(&mut self, world: &mut World, s: &CameraSettings, f: &FrameInput) {
+        if let Some(manual) = self.manual_view {
+            self.position = manual.position;
+            self.target = manual.target;
+            self.fov_y = manual.fov_y;
+            self.anim = None;
+            return;
+        }
         if !world.rlva.enabled() {
             self.update_unrestricted(world, s, f);
             return;
@@ -1438,6 +1498,13 @@ impl Camera {
     }
 
     fn update_unrestricted(&mut self, world: &mut World, s: &CameraSettings, f: &FrameInput) {
+        if let Some(manual) = self.manual_view {
+            self.position = manual.position;
+            self.target = manual.target;
+            self.fov_y = manual.fov_y;
+            self.anim = None;
+            return;
+        }
         if self.flycam_lens.is_some_and(|(original, _)| original != s.fov) {
             // A subsequent lens edit takes ownership of the value, including
             // when the user later returns to the pre-flight preference.
@@ -3460,5 +3527,43 @@ mod tests {
             }
             assert!(camera.position.abs_diff_eq(stopped, 1e-4));
         }
+    }
+
+    #[test]
+    fn manual_view_persists_across_camera_updates_and_resets_cleanly() {
+        let mut cam = Camera::default();
+        let mut w = world_at(Vec3::new(128.0, 128.0, 25.0));
+        let s = CameraSettings::default();
+        let f = frame(1.0 / 60.0);
+
+        // 1. Initial follow camera
+        cam.update(&mut w, &s, &f);
+        assert!(!cam.is_manual_view());
+
+        // 2. Set manual camera override (as done by LEAP LLCamera.set)
+        let manual_pos = Vec3::new(140.0, 150.0, 42.0);
+        let manual_target = Vec3::new(128.0, 128.0, 26.0);
+        let manual_fov = 45.0_f32.to_radians();
+        cam.set_manual_view(Some(manual_pos), Some(manual_target), Some(manual_fov));
+
+        assert!(cam.is_manual_view());
+        assert_eq!(cam.position, manual_pos);
+        assert_eq!(cam.target, manual_target);
+        assert_eq!(cam.fov_y, manual_fov);
+
+        // 3. Run 60 frames of camera.update: verify position, target, and fov do NOT get erased by follow camera
+        for _ in 0..60 {
+            cam.update(&mut w, &s, &f);
+            assert_eq!(cam.position, manual_pos);
+            assert_eq!(cam.target, manual_target);
+            assert_eq!(cam.fov_y, manual_fov);
+        }
+
+        // 4. Handle reset view (e.g. Escape or LLCamera.reset)
+        cam.handle_reset_view(&mut w.agent, &s);
+        assert!(!cam.is_manual_view());
+        cam.update(&mut w, &s, &f);
+        // Position now tracks avatar again
+        assert_ne!(cam.position, manual_pos);
     }
 }

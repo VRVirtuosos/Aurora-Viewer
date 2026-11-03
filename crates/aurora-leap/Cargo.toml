@@ -1,0 +1,22 @@
+[package]
+name = "aurora-leap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Native Rust Linden Lab Event API Protocol (LEAP) transport and pub/sub engine for Aurora Viewer."
+
+[dependencies]
+aurora-llsd = { version = "0.1.0", path = "../aurora-llsd" }
+crossbeam-channel = "0.5.17"
+log = "0.4.34"
+parking_lot = "0.13.0"
+thiserror = "2.0.21"
+uuid = { version = "1.29.0", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[lints]
+workspace = true
