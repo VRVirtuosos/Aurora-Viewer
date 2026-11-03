@@ -78,6 +78,14 @@ fn root_for(demo: bool, demo_dir: Option<std::ffi::OsString>) -> PathBuf {
         .join(if demo { "demo" } else { "sessions" })
 }
 
+pub fn should_suppress_crash_dialog() -> bool {
+    crate::cli::get().leap_stdio
+        || crate::cli::get().leap.is_some()
+        || std::env::var_os("AURORA_LEAP_GUI").is_some()
+        || std::env::var_os("AURORA_NO_CRASH_DIALOG").is_some()
+        || std::env::args().any(|a| a == "--headless" || a == "--no-crash-dialog")
+}
+
 fn read_limited(path: &Path, limit: u64) -> std::io::Result<String> {
     let file = std::fs::File::open(path)?;
     if file.metadata()?.len() > limit {
@@ -122,7 +130,9 @@ pub fn helper() -> anyhow::Result<bool> {
     if args[index] == "--crash-watch" {
         native::watch(&dir, &record)?;
     } else {
-        show_once(&dir)?;
+        if !should_suppress_crash_dialog() {
+            show_once(&dir)?;
+        }
     }
     Ok(true)
 }
@@ -232,7 +242,7 @@ fn start_inner() -> anyhow::Result<()> {
         return Ok(());
     }
     #[cfg(windows)]
-    {
+    if !should_suppress_crash_dialog() {
         let mut child = spawn_helper(&dir, "--crash-watch")?;
         // The child must hold a process handle before a very early crash.
         // A bounded handshake also avoids losing crashes to PID reuse.
@@ -290,6 +300,9 @@ pub fn finished(success: bool) {
     if let Some(session) = SESSION.get() {
         let marker = if success { "normal" } else { "failed" };
         let _ = std::fs::write(session.dir.join(marker), []);
+        if should_suppress_crash_dialog() {
+            let _ = std::fs::write(session.dir.join("acknowledged"), []);
+        }
     }
 }
 
@@ -422,6 +435,12 @@ fn preserve(dir: &Path, exit_code: u32) -> anyhow::Result<()> {
 }
 
 fn recover() {
+    if should_suppress_crash_dialog() {
+        recover_in(&root(), |dir| {
+            let _ = std::fs::write(dir.join("acknowledged"), []);
+        });
+        return;
+    }
     recover_in(&root(), |dir| {
         let _ = spawn_helper(dir, "--crash-show");
     });

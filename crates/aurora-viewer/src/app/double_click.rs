@@ -47,7 +47,7 @@ impl App {
 
     /// walkToClickedLocation: not while flying or manually sitting. Our own
     /// idle anchor releases before the walk and does not cancel its handover.
-    fn walk_to(&mut self, point: Vec3, run: bool) {
+    pub(crate) fn walk_to(&mut self, point: Vec3, run: bool) {
         let agent = &self.world.agent;
         if agent.flying || self.native_anchor.blocks_walk(agent.seated, agent.ground_sit) || !point.is_finite() {
             return;
@@ -134,7 +134,7 @@ impl App {
 
     /// Running while walking there, besides "Always run" and a double-tap
     /// run (SetAlwaysRun is one state for all three).
-    fn sync_run(&mut self) {
+    pub(super) fn sync_run(&mut self) {
         let run = self.running();
         self.send(NetCommand::SetAlwaysRun(run));
     }
@@ -185,7 +185,7 @@ impl App {
     }
 
     /// stopAutoPilot: the avatar stops (AGENT_CONTROL_STOP this frame).
-    pub(super) fn stop_autopilot(&mut self, user_cancel: bool) {
+    pub(crate) fn stop_autopilot(&mut self, user_cancel: bool) {
         if user_cancel {
             self.world.cancel_friend_join();
         }
