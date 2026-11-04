@@ -74,6 +74,106 @@ fn connection(live: &mut Live, ui: &mut egui::Ui, p: &crate::theme::Palette, can
     shape_controls(live, ui, p);
     object_list(live, ui, p, can_upload);
     object_controls(live, ui, p);
+
+    let mut stop_broadcast = false;
+    let mut start_broadcast = false;
+    let mut stop_spectator = false;
+    let mut start_spectator = false;
+
+    ui.add_space(8.0);
+    widgets::collapsing(
+        ui,
+        p,
+        "blender_live_broadcast_section",
+        aurora_i18n::tr!("blender-live-broadcast-heading"),
+        live.broadcast_server.is_some(),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(aurora_i18n::tr!("blender-live-broadcast-port"));
+                ui.add_enabled(
+                    live.broadcast_server.is_none(),
+                    egui::DragValue::new(&mut live.broadcast_port).range(1024..=65535),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(aurora_i18n::tr!("blender-live-broadcast-passcode"));
+                ui.add_enabled(
+                    live.broadcast_server.is_none(),
+                    egui::TextEdit::singleline(&mut live.broadcast_passcode).desired_width(120.0),
+                );
+            });
+            let guests_count = live.broadcast_server.as_ref().map(|s| s.broadcaster.status.read().guests_count);
+            if let Some(count) = guests_count {
+                ui.colored_label(
+                    p.violet_light,
+                    aurora_i18n::tr!("blender-live-broadcast-guests", count = count),
+                );
+                if widgets::flat_button(ui, p, aurora_i18n::tr!("blender-live-broadcast-stop")).clicked() {
+                    stop_broadcast = true;
+                }
+            } else {
+                if widgets::flat_button(ui, p, aurora_i18n::tr!("blender-live-broadcast-start")).clicked() {
+                    start_broadcast = true;
+                }
+            }
+        },
+    );
+
+    widgets::collapsing(
+        ui,
+        p,
+        "blender_live_spectator_section",
+        aurora_i18n::tr!("blender-live-spectator-heading"),
+        live.is_spectator(),
+        |ui| {
+            let spectator_info = live.spectator_client.as_ref().map(|s| {
+                let st = s.shared.status.lock();
+                (st.connected, st.received, st.host.clone(), st.port)
+            });
+            if let Some((connected, received, host, port)) = spectator_info {
+                if connected {
+                    ui.colored_label(
+                        p.violet_light,
+                        aurora_i18n::tr!("blender-live-spectator-connected", received = received),
+                    );
+                } else {
+                    ui.colored_label(p.muted, format!("Connecting to {host}:{port}..."));
+                }
+                if widgets::flat_button(ui, p, aurora_i18n::tr!("blender-live-spectator-disconnect")).clicked() {
+                    stop_spectator = true;
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(aurora_i18n::tr!("blender-live-spectator-host"));
+                    ui.add(egui::TextEdit::singleline(&mut live.spectator_host).desired_width(140.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(aurora_i18n::tr!("blender-live-broadcast-port"));
+                    ui.add(egui::DragValue::new(&mut live.spectator_port).range(1024..=65535));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(aurora_i18n::tr!("blender-live-broadcast-passcode"));
+                    ui.add(egui::TextEdit::singleline(&mut live.spectator_passcode).desired_width(120.0));
+                });
+                if widgets::flat_button(ui, p, aurora_i18n::tr!("blender-live-spectator-connect")).clicked() {
+                    start_spectator = true;
+                }
+            }
+        },
+    );
+
+    if stop_broadcast {
+        live.stop_broadcast();
+    }
+    if start_broadcast {
+        live.broadcast_start_requested = true;
+    }
+    if stop_spectator {
+        live.stop_spectator();
+    }
+    if start_spectator {
+        live.spectator_requested = true;
+    }
     let error = live
         .error
         .clone()

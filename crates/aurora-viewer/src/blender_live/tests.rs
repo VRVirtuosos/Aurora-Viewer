@@ -1090,3 +1090,99 @@ fn blender_lods_transport_negotiates_ignores_stale_results_and_keeps_live_revisi
     assert_eq!(shared.status.lock().received, 2);
     drop(owner);
 }
+
+
+#[test]
+fn test_broadcast_handshake_and_spectator_streaming() {
+    let ctx = egui::Context::default();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("free port");
+    let port = probe.local_addr().expect("addr").port();
+    drop(probe);
+
+    let host_id = Uuid::new_v4();
+    let server = broadcast::start(port, Some("testpass123".into()), Some(host_id), ctx.clone()).expect("server");
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Connect spectator client
+    let spectator = spectator::start(
+        "127.0.0.1".into(),
+        port,
+        Some("testpass123".into()),
+        supported(),
+        ctx.clone(),
+        None,
+    ).expect("spectator client");
+
+    // Wait for handshake
+    let mut connected = false;
+    for _ in 0..50 {
+        if spectator.shared.status.lock().connected {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(connected, "spectator connected: {:?}", spectator.shared.status.lock().error);
+    assert_eq!(spectator.shared.status.lock().host_agent_id, Some(host_id));
+    assert_eq!(server.broadcaster.status.read().guests_count, 1);
+
+    // Broadcast a frame
+    let frame_data = serde_json::to_vec(&triangle()).expect("json");
+    server.broadcaster.broadcast(1, &frame_data);
+
+    // Verify spectator receives frame
+    let mut received = false;
+    for _ in 0..50 {
+        if spectator.shared.latest.lock().is_some() {
+            received = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(received, "spectator received broadcast snapshot");
+    let prepared = spectator.shared.latest.lock().take().expect("prepared");
+    assert_eq!(prepared.revision, 1);
+    assert_eq!(prepared.host_agent_id, Some(host_id));
+
+    // Drop spectator and check client list prunes
+    drop(spectator);
+    for _ in 0..100 {
+        if server.broadcaster.status.read().guests_count == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.broadcaster.status.read().guests_count, 0);
+}
+
+#[test]
+fn test_broadcast_invalid_passcode_rejection() {
+    let ctx = egui::Context::default();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("free port");
+    let port = probe.local_addr().expect("addr").port();
+    drop(probe);
+
+    let _server = broadcast::start(port, Some("secret".into()), None, ctx.clone()).expect("server");
+    std::thread::sleep(Duration::from_millis(50));
+
+    let spectator = spectator::start(
+        "127.0.0.1".into(),
+        port,
+        Some("wrong_pass".into()),
+        supported(),
+        ctx.clone(),
+        None,
+    ).expect("spectator");
+
+    // Wait and verify error
+    let mut rejected = false;
+    for _ in 0..50 {
+        let err = spectator.shared.status.lock().error.clone();
+        if err.is_some_and(|e| e.contains("Invalid passcode") || e.contains("rejected")) {
+            rejected = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(rejected, "spectator was rejected with invalid passcode");
+}

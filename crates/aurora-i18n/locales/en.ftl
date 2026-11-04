@@ -12452,6 +12452,18 @@ blender-object-drop = Drop to ground
 blender-object-derez = Derez
 blender-live-local-only = Only you see this preview. No asset upload. Closing this window keeps it active; Stop removes it.
 
+blender-live-broadcast-heading = Guest Spectator Broadcast
+blender-live-broadcast-port = Broadcast port
+blender-live-broadcast-passcode = Passcode
+blender-live-broadcast-start = Start Broadcast
+blender-live-broadcast-stop = Stop Broadcast
+blender-live-broadcast-guests = Connected spectators: { $count }
+blender-live-spectator-heading = Join LiveMesh Session
+blender-live-spectator-host = Host IP / Name
+blender-live-spectator-connect = Connect as Spectator
+blender-live-spectator-disconnect = Disconnect Spectator
+blender-live-spectator-connected = Connected as spectator: { $received } updates received
+
 inventory-menu-new = New...
 inventory-menu-demo-group = My actions
 inventory-menu-favorites = Favorites

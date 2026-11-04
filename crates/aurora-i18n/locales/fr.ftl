@@ -12448,6 +12448,18 @@ blender-object-drop = Poser au sol
 blender-object-derez = Dérezzer
 blender-live-local-only = Cet aperçu est visible uniquement par vous, sans import automatique. Fermer cette fenêtre le laisse actif ; Arrêter le retire.
 
+blender-live-broadcast-heading = Diffusion spectateur invité
+blender-live-broadcast-port = Port de diffusion
+blender-live-broadcast-passcode = Code d'accès
+blender-live-broadcast-start = Démarrer la diffusion
+blender-live-broadcast-stop = Arrêter la diffusion
+blender-live-broadcast-guests = Spectateurs connectés : { $count }
+blender-live-spectator-heading = Rejoindre une session LiveMesh
+blender-live-spectator-host = IP / Nom de l'hôte
+blender-live-spectator-connect = Se connecter en tant que spectateur
+blender-live-spectator-disconnect = Déconnecter le spectateur
+blender-live-spectator-connected = Connecté en tant que spectateur : { $received } mises à jour
+
 inventory-menu-new = Nouveau...
 inventory-menu-demo-group = Mes actions
 inventory-menu-favorites = Favoris

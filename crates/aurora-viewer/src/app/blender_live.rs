@@ -157,8 +157,13 @@ impl App {
             }
         }
         self.update_blender_shape();
-        if self.blender_live.owner.is_some_and(|owner| owner != self.world.agent_id) {
+        if !self.blender_live.is_spectator()
+            && self.blender_live.owner.is_some_and(|owner| owner != self.world.agent_id)
+        {
             self.blender_live.stop();
+        }
+        if let Some(server) = self.blender_live.broadcast_server.as_ref() {
+            server.broadcaster.set_host_agent_id(Some(self.world.agent_id));
         }
         self.blender_live.poll_import();
         if !self.imports.busy()
@@ -172,6 +177,16 @@ impl App {
             self.blender_live.start(
                 self.blender_joints(),
                 self.blender_rest_axes(),
+                &self.egui_ctx,
+                renderer.staging_pool(),
+            );
+        }
+        if std::mem::take(&mut self.blender_live.broadcast_start_requested) {
+            self.blender_live.start_broadcast(&self.egui_ctx, Some(self.world.agent_id));
+        }
+        if std::mem::take(&mut self.blender_live.spectator_requested) {
+            self.blender_live.start_spectator(
+                self.blender_joints(),
                 &self.egui_ctx,
                 renderer.staging_pool(),
             );
@@ -252,10 +267,11 @@ impl App {
             }
         }
         if let Some(snapshot) = self.blender_live.take_latest() {
+            let host_agent = snapshot.host_agent_id;
             if let Some(old) = self.blender_live.receive(snapshot) {
                 self.scene.jobs.discard(old);
             }
-            self.blender_live.owner = Some(self.world.agent_id);
+            self.blender_live.owner = host_agent.or(Some(self.world.agent_id));
         }
         if self.demo
             && self.frame_count == 450
@@ -353,9 +369,10 @@ impl App {
             .objects
             .iter()
             .any(|id| self.world.objects.index_of_uuid(id).is_none());
+        let target_agent = self.blender_live.snapshot.as_ref().and_then(|s| s.host_agent_id).unwrap_or(self.world.agent_id);
         if let Some(snapshot) = self.blender_live.snapshot.as_ref()
             && (Some(snapshot.revision) != self.blender_live.revision || missing)
-            && self.world.objects.index_of_uuid(&self.world.agent_id).is_some()
+            && self.world.objects.index_of_uuid(&target_agent).is_some()
             && let Some(snapshot) = self.blender_live.snapshot.clone()
         {
             self.install_blender_snapshot(snapshot, renderer);
@@ -421,10 +438,11 @@ impl App {
         if !self.scene.install_preview_images(&snapshot.images, renderer) {
             return;
         }
+        let target_agent = snapshot.host_agent_id.unwrap_or(self.world.agent_id);
         let Some(parent) = self
             .world
             .objects
-            .index_of_uuid(&self.world.agent_id)
+            .index_of_uuid(&target_agent)
             .and_then(|i| self.world.objects.get(i))
             .map(|o| o.key)
         else {

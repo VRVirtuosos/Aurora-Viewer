@@ -73,6 +73,7 @@ pub struct Prepared {
     pub triangles: usize,
     pub images: Vec<PreparedImage>,
     pub sources: Vec<PreparedSource>,
+    pub host_agent_id: Option<Uuid>,
 }
 
 #[derive(Clone)]
@@ -395,5 +396,6 @@ pub(super) fn prepare_snapshot(
         triangles,
         images,
         sources,
+        host_agent_id: None,
     })
 }

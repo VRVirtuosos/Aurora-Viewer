@@ -12427,6 +12427,18 @@ blender-object-drop = 地面に置く
 blender-object-derez = Rez解除
 blender-live-local-only = このプレビューはあなたにしか見えません。アセットはアップロードされません。このウィンドウを閉じても有効なままで、停止で削除されます。
 
+blender-live-broadcast-heading = ゲストスペクテイター配信
+blender-live-broadcast-port = 配信ポート
+blender-live-broadcast-passcode = パスコード
+blender-live-broadcast-start = 配信開始
+blender-live-broadcast-stop = 配信停止
+blender-live-broadcast-guests = 接続中のスペクテイター: { $count }
+blender-live-spectator-heading = LiveMesh セッションに参加
+blender-live-spectator-host = ホストIP / 名前
+blender-live-spectator-connect = スペクテイターとして接続
+blender-live-spectator-disconnect = スペクテイターを切断
+blender-live-spectator-connected = スペクテイターとして接続中: { $received } 回受信
+
 inventory-menu-new = 新規…
 inventory-menu-demo-group = 自分の操作
 inventory-menu-favorites = お気に入り

@@ -3,6 +3,7 @@
 //! complete snapshot. Session state is deliberately never persisted.
 
 mod addon;
+pub mod broadcast;
 mod demo;
 mod geometry;
 pub(crate) mod import;
@@ -11,6 +12,7 @@ mod links;
 pub mod objects;
 pub mod protocol;
 pub(crate) mod shape;
+pub mod spectator;
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -67,6 +69,7 @@ pub(crate) struct Shared {
     pub import_request: Mutex<Option<import::Request>>,
     pub import_expected: Mutex<Option<import::Request>>,
     pub import_result: Mutex<Option<(Uuid, Result<import::Bundle, String>)>>,
+    pub broadcaster: Mutex<Option<Arc<broadcast::Broadcaster>>>,
 }
 
 struct Server {
@@ -113,6 +116,15 @@ pub struct Live {
     pub next_local_id: u32,
     pub attach_choices: Vec<(u8, bool, String)>,
     pub placement_dirty: HashSet<Uuid>,
+    pub broadcast_port: u16,
+    pub broadcast_passcode: String,
+    pub broadcast_server: Option<broadcast::Server>,
+    pub spectator_host: String,
+    pub spectator_port: u16,
+    pub spectator_passcode: String,
+    pub spectator_client: Option<spectator::Client>,
+    pub broadcast_start_requested: bool,
+    pub spectator_requested: bool,
 }
 impl Default for Live {
     fn default() -> Self {
@@ -150,6 +162,15 @@ impl Default for Live {
             next_local_id: 1,
             attach_choices: Vec::new(),
             placement_dirty: HashSet::new(),
+            broadcast_port: broadcast::DEFAULT_BROADCAST_PORT,
+            broadcast_passcode: String::new(),
+            broadcast_server: None,
+            spectator_host: "127.0.0.1".to_string(),
+            spectator_port: broadcast::DEFAULT_BROADCAST_PORT,
+            spectator_passcode: String::new(),
+            spectator_client: None,
+            broadcast_start_requested: false,
+            spectator_requested: false,
         }
     }
 }
@@ -270,8 +291,12 @@ impl Live {
         Some(snapshot)
     }
 
+    pub fn is_spectator(&self) -> bool {
+        self.spectator_client.is_some()
+    }
+
     pub fn running(&self) -> bool {
-        self.server.is_some()
+        self.server.is_some() || self.spectator_client.is_some()
     }
 
     pub fn start(
@@ -286,6 +311,9 @@ impl Live {
         }
         match transport::start(self.port, supported, rest_axes, ctx.clone(), Some(pool)) {
             Ok(shared) => {
+                if let Some(broadcaster) = self.broadcast_server.as_ref().map(|s| s.broadcaster.clone()) {
+                    *shared.broadcaster.lock() = Some(broadcaster);
+                }
                 self.server = Some(Server { shared });
                 self.error = None;
             }
@@ -293,14 +321,74 @@ impl Live {
         }
     }
 
+    pub fn start_broadcast(&mut self, ctx: &egui::Context, host_agent_id: Option<Uuid>) {
+        if self.broadcast_server.is_some() {
+            return;
+        }
+        let passcode = (!self.broadcast_passcode.trim().is_empty()).then(|| self.broadcast_passcode.trim().to_string());
+        match broadcast::start(self.broadcast_port, passcode, host_agent_id, ctx.clone()) {
+            Ok(server) => {
+                if let Some(host_server) = self.server.as_ref() {
+                    *host_server.shared.broadcaster.lock() = Some(server.broadcaster.clone());
+                }
+                self.broadcast_server = Some(server);
+            }
+            Err(e) => {
+                self.error = Some(format!("Broadcast start failed: {e}"));
+            }
+        }
+    }
+
+    pub fn stop_broadcast(&mut self) {
+        if let Some(host_server) = self.server.as_ref() {
+            host_server.shared.broadcaster.lock().take();
+        }
+        self.broadcast_server = None;
+    }
+
+    pub fn start_spectator(
+        &mut self,
+        supported: HashSet<String>,
+        ctx: &egui::Context,
+        pool: Arc<aurora_render::StagingPool>,
+    ) {
+        self.stop();
+        let passcode = (!self.spectator_passcode.trim().is_empty()).then(|| self.spectator_passcode.trim().to_string());
+        match spectator::start(
+            self.spectator_host.clone(),
+            self.spectator_port,
+            passcode,
+            supported,
+            ctx.clone(),
+            Some(pool),
+        ) {
+            Ok(client) => {
+                self.spectator_client = Some(client);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    pub fn stop_spectator(&mut self) {
+        self.spectator_client = None;
+        self.clear = true;
+    }
+
     pub fn stop(&mut self) {
         self.import = Default::default();
         self.start_requested = false;
         self.server = None;
+        self.spectator_client = None;
         self.clear = true;
     }
 
     pub fn take_latest(&mut self) -> Option<protocol::Prepared> {
+        if let Some(spectator) = self.spectator_client.as_ref() {
+            if let Some(latest) = spectator.shared.latest.lock().take() {
+                return Some(latest);
+            }
+        }
         self.server.as_ref()?.shared.latest.lock().take()
     }
 

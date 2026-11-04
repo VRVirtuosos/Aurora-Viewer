@@ -168,6 +168,9 @@ fn serve(
                 previous = Some(revision);
                 images = prepared.images.iter().map(|image| (image.id, image.clone())).collect();
                 *shared.latest.lock() = Some(prepared);
+                if let Some(broadcaster) = shared.broadcaster.lock().as_ref() {
+                    broadcaster.broadcast(revision, &bytes);
+                }
                 let mut status = shared.status.lock();
                 status.received += 1;
                 status.error = None;
