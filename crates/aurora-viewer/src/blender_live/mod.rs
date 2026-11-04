@@ -125,6 +125,7 @@ pub struct Live {
     pub spectator_client: Option<spectator::Client>,
     pub broadcast_start_requested: bool,
     pub spectator_requested: bool,
+    pub last_broadcast_sync: Option<broadcast::InworldSync>,
 }
 impl Default for Live {
     fn default() -> Self {
@@ -171,6 +172,7 @@ impl Default for Live {
             spectator_client: None,
             broadcast_start_requested: false,
             spectator_requested: false,
+            last_broadcast_sync: None,
         }
     }
 }
@@ -381,6 +383,49 @@ impl Live {
         self.server = None;
         self.spectator_client = None;
         self.clear = true;
+    }
+
+    pub fn build_inworld_sync(&self) -> broadcast::InworldSync {
+        broadcast::InworldSync {
+            placements: self
+                .placements
+                .iter()
+                .map(|(&id, &p)| (id, p.into()))
+                .collect(),
+            states: self
+                .states
+                .iter()
+                .map(|(&id, &s)| (id, s.into()))
+                .collect(),
+        }
+    }
+
+    pub fn take_inworld_sync(&mut self) -> Option<broadcast::InworldSync> {
+        self.spectator_client.as_ref()?.shared.inworld_sync.lock().take()
+    }
+
+    pub fn apply_inworld_sync(&mut self, sync: broadcast::InworldSync, world: &mut crate::world::World) {
+        let mut location_changed = false;
+        for (id, wire_placement) in sync.placements {
+            let placement = wire_placement.to_placement();
+            if let Some(old) = self.placements.insert(id, placement) {
+                if old.location != placement.location || old.parent != placement.parent {
+                    location_changed = true;
+                }
+            } else {
+                location_changed = true;
+            }
+            self.apply_transform(id, world);
+        }
+        for (id, wire_state) in sync.states {
+            let state = wire_state.into();
+            if self.states.insert(id, state) != Some(state) {
+                location_changed = true;
+            }
+        }
+        if location_changed {
+            self.revision = None;
+        }
     }
 
     pub fn take_latest(&mut self) -> Option<protocol::Prepared> {

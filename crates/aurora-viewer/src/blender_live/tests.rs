@@ -1186,3 +1186,74 @@ fn test_broadcast_invalid_passcode_rejection() {
     }
     assert!(rejected, "spectator was rejected with invalid passcode");
 }
+
+
+#[test]
+fn test_broadcast_and_spectator_inworld_sync() {
+    let ctx = egui::Context::default();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("free port");
+    let port = probe.local_addr().expect("addr").port();
+    drop(probe);
+
+    let host_id = Uuid::new_v4();
+    let server = broadcast::start(port, None, Some(host_id), ctx.clone()).expect("server");
+    std::thread::sleep(Duration::from_millis(50));
+
+    let spectator = spectator::start(
+        "127.0.0.1".into(),
+        port,
+        None,
+        supported(),
+        ctx.clone(),
+        None,
+    ).expect("spectator");
+
+    // Wait for connection
+    let mut connected = false;
+    for _ in 0..50 {
+        if spectator.shared.status.lock().connected {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(connected, "spectator connected");
+
+    // Create an inworld placement and state
+    let source_id = Uuid::new_v4();
+    let placement = objects::Placement {
+        parent: None,
+        offset: glam::Vec3::new(1.0, 2.0, 3.0),
+        location: objects::Location::Attachment(6),
+        position: glam::Vec3::new(128.5, 128.0, 25.5),
+        rotation: glam::Quat::from_rotation_z(1.57),
+        scale: glam::Vec3::new(1.2, 1.2, 1.2),
+        size: glam::Vec3::new(0.5, 0.5, 0.5),
+        center: glam::Vec3::ZERO,
+    };
+
+    let mut placements = std::collections::HashMap::new();
+    placements.insert(source_id, placement.into());
+    let mut states = std::collections::HashMap::new();
+    states.insert(source_id, broadcast::WireSourceState::Visible);
+
+    let sync = broadcast::InworldSync { placements, states };
+    server.broadcaster.broadcast_inworld_sync(&sync);
+
+    // Wait for spectator to receive inworld sync frame
+    let mut sync_received = None;
+    for _ in 0..50 {
+        if let Some(s) = spectator.shared.inworld_sync.lock().take() {
+            sync_received = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let received = sync_received.expect("spectator received inworld sync");
+    let received_placement = received.placements.get(&source_id).expect("source placement");
+    assert_eq!(received_placement.location, broadcast::WireLocation::Attachment(6));
+    assert_eq!(received_placement.position, [128.5, 128.0, 25.5]);
+    assert_eq!(received_placement.scale, [1.2, 1.2, 1.2]);
+    assert_eq!(received.states.get(&source_id), Some(&broadcast::WireSourceState::Visible));
+}

@@ -164,6 +164,14 @@ impl App {
         }
         if let Some(server) = self.blender_live.broadcast_server.as_ref() {
             server.broadcaster.set_host_agent_id(Some(self.world.agent_id));
+            let sync = self.blender_live.build_inworld_sync();
+            if self.blender_live.last_broadcast_sync.as_ref() != Some(&sync) {
+                self.blender_live.last_broadcast_sync = Some(sync.clone());
+                server.broadcaster.broadcast_inworld_sync(&sync);
+            }
+        }
+        if let Some(sync) = self.blender_live.take_inworld_sync() {
+            self.blender_live.apply_inworld_sync(sync, &mut self.world);
         }
         self.blender_live.poll_import();
         if !self.imports.busy()

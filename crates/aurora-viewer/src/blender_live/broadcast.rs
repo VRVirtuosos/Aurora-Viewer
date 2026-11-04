@@ -1,8 +1,10 @@
 //! Multi-client broadcast relay for LiveMesh.
 //! Allows guest spectators to connect in a non-edit (view-only) capacity.
 
+use glam::{Quat, Vec3};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::{
+    collections::HashMap,
     io::{self, BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     sync::{
@@ -12,6 +14,110 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+use super::objects::{Location, Placement};
+use super::SourceState;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WireLocation {
+    World,
+    Attachment(u8),
+    Detached,
+}
+
+impl From<Location> for WireLocation {
+    fn from(loc: Location) -> Self {
+        match loc {
+            Location::World => WireLocation::World,
+            Location::Attachment(point) => WireLocation::Attachment(point),
+            Location::Detached => WireLocation::Detached,
+        }
+    }
+}
+
+impl From<WireLocation> for Location {
+    fn from(loc: WireLocation) -> Self {
+        match loc {
+            WireLocation::World => Location::World,
+            WireLocation::Attachment(point) => Location::Attachment(point),
+            WireLocation::Detached => Location::Detached,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WireSourceState {
+    Visible,
+    Hidden,
+    Removed,
+}
+
+impl From<SourceState> for WireSourceState {
+    fn from(s: SourceState) -> Self {
+        match s {
+            SourceState::Visible => WireSourceState::Visible,
+            SourceState::Hidden => WireSourceState::Hidden,
+            SourceState::Removed => WireSourceState::Removed,
+        }
+    }
+}
+
+impl From<WireSourceState> for SourceState {
+    fn from(s: WireSourceState) -> Self {
+        match s {
+            WireSourceState::Visible => SourceState::Visible,
+            WireSourceState::Hidden => SourceState::Hidden,
+            WireSourceState::Removed => SourceState::Removed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WirePlacement {
+    pub parent: Option<Uuid>,
+    pub offset: [f32; 3],
+    pub location: WireLocation,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+    pub size: [f32; 3],
+    pub center: [f32; 3],
+}
+
+impl From<Placement> for WirePlacement {
+    fn from(p: Placement) -> Self {
+        Self {
+            parent: p.parent,
+            offset: p.offset.to_array(),
+            location: p.location.into(),
+            position: p.position.to_array(),
+            rotation: p.rotation.to_array(),
+            scale: p.scale.to_array(),
+            size: p.size.to_array(),
+            center: p.center.to_array(),
+        }
+    }
+}
+
+impl WirePlacement {
+    pub fn to_placement(&self) -> Placement {
+        Placement {
+            parent: self.parent,
+            offset: Vec3::from_array(self.offset),
+            location: self.location.into(),
+            position: Vec3::from_array(self.position),
+            rotation: Quat::from_array(self.rotation),
+            scale: Vec3::from_array(self.scale),
+            size: Vec3::from_array(self.size),
+            center: Vec3::from_array(self.center),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InworldSync {
+    pub placements: HashMap<Uuid, WirePlacement>,
+    pub states: HashMap<Uuid, WireSourceState>,
+}
 
 pub const DEFAULT_BROADCAST_PORT: u16 = 17656;
 pub const GUEST_MAGIC: &[u8; 8] = b"AURGST1\n";
@@ -40,6 +146,7 @@ pub struct Broadcaster {
     pub host_agent_id: RwLock<Option<Uuid>>,
     pub passcode: RwLock<Option<String>>,
     pub last_snapshot: Mutex<Option<(u64, Arc<Vec<u8>>)>>,
+    pub last_inworld_sync: Mutex<Option<Arc<Vec<u8>>>>,
     pub clients: Mutex<Vec<Arc<ClientSlot>>>,
     pub status: RwLock<BroadcastStatus>,
     pub stop: AtomicBool,
@@ -61,6 +168,7 @@ impl Broadcaster {
             host_agent_id: RwLock::new(host_agent_id),
             passcode: RwLock::new(passcode),
             last_snapshot: Mutex::new(None),
+            last_inworld_sync: Mutex::new(None),
             clients: Mutex::new(Vec::new()),
             status: RwLock::new(BroadcastStatus {
                 running: true,
@@ -92,6 +200,21 @@ impl Broadcaster {
             client.wake.notify_one();
         }
         self.status.write().total_sent += 1;
+    }
+
+    pub fn broadcast_inworld_sync(&self, sync: &InworldSync) {
+        if let Ok(json_bytes) = serde_json::to_vec(sync) {
+            let mut packet = b"SYNC".to_vec();
+            packet.extend(json_bytes);
+            let arc_packet = Arc::new(packet);
+            *self.last_inworld_sync.lock() = Some(arc_packet.clone());
+
+            let clients = self.clients.lock();
+            for client in clients.iter() {
+                *client.pending.lock() = Some(arc_packet.clone());
+                client.wake.notify_one();
+            }
+        }
     }
 
     pub fn stop(&self) {
@@ -238,10 +361,18 @@ fn handle_guest_connection(mut stream: TcpStream, broadcaster: Arc<Broadcaster>,
         frames_sent: AtomicU64::new(0),
     });
 
-    // If a snapshot already exists, immediately seed this guest
+    // If snapshot or inworld sync already exist, immediately seed this guest
     if let Some((_rev, ref frame)) = *broadcaster.last_snapshot.lock() {
-        *slot.pending.lock() = Some(frame.clone());
+        let len = (frame.len() as u32).to_le_bytes();
+        let _ = stream.write_all(&len);
+        let _ = stream.write_all(frame);
     }
+    if let Some(ref sync_frame) = *broadcaster.last_inworld_sync.lock() {
+        let len = (sync_frame.len() as u32).to_le_bytes();
+        let _ = stream.write_all(&len);
+        let _ = stream.write_all(sync_frame);
+    }
+    let _ = stream.flush();
 
     {
         let mut clients = broadcaster.clients.lock();

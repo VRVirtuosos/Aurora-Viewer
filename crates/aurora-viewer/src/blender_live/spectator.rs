@@ -31,6 +31,7 @@ pub struct SpectatorShared {
     pub stop: AtomicBool,
     pub status: Mutex<SpectatorStatus>,
     pub latest: Mutex<Option<Prepared>>,
+    pub inworld_sync: Mutex<Option<super::broadcast::InworldSync>>,
 }
 
 pub struct Client {
@@ -212,6 +213,14 @@ fn run_spectator(
                 ctx.request_repaint();
             }
             break;
+        }
+
+        if bytes.starts_with(b"SYNC") {
+            if let Ok(sync) = serde_json::from_slice::<super::broadcast::InworldSync>(&bytes[4..]) {
+                *shared.inworld_sync.lock() = Some(sync);
+                ctx.request_repaint();
+            }
+            continue;
         }
 
         let result = protocol::prepare_staged(&bytes, &supported, pool.as_deref(), &images).and_then(|mut prepared| {
